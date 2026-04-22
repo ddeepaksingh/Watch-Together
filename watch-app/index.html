@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LocalSync | Movie Night</title>
+    <style>
+        :root {
+            --bg-color: #09090b;
+            --panel-bg: #18181b;
+            --text-main: #fafafa;
+            --primary: #e11d48;
+            --primary-hover: #be123c;
+            --border: #27272a;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .header {
+            width: 100%;
+            padding: 20px 0;
+            text-align: center;
+            background-color: var(--panel-bg);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+        }
+        h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+        h1 span { color: var(--primary); }
+        .room-badge {
+            display: inline-block;
+            background: rgba(225, 29, 72, 0.15);
+            color: #fb7185;
+            padding: 6px 16px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-top: 10px;
+            letter-spacing: 1px;
+        }
+        .container {
+            width: 95%;
+            max-width: 900px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .controls {
+            display: flex;
+            gap: 12px;
+            background: var(--panel-bg);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            flex-wrap: wrap;
+        }
+        input[type="text"] {
+            flex-grow: 1;
+            padding: 14px 18px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: var(--bg-color);
+            color: var(--text-main);
+            font-size: 15px;
+            min-width: 200px;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+        button {
+            padding: 14px 24px;
+            border-radius: 10px;
+            border: none;
+            background-color: var(--primary);
+            color: white;
+            font-weight: 600;
+            font-size: 15px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        button:hover { background-color: var(--primary-hover); transform: translateY(-1px); }
+        .share-btn { background-color: #27272a; border: 1px solid #3f3f46; }
+        .share-btn:hover { background-color: #3f3f46; }
+        
+        #errorBox {
+            display: none;
+            background-color: rgba(225, 29, 72, 0.1);
+            color: #fb7185;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid var(--primary);
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .video-wrapper {
+            position: relative;
+            padding-bottom: 56.25%;
+            height: 0;
+            overflow: hidden;
+            border-radius: 16px;
+            background: #000;
+            border: 1px solid var(--border);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+        }
+        .video-wrapper iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        
+        #toast {
+            visibility: hidden; min-width: 250px; background-color: #10b981; color: #fff;
+            text-align: center; border-radius: 8px; padding: 16px; position: fixed;
+            z-index: 1; bottom: 30px; font-size: 15px; font-weight: 500; opacity: 0;
+            transition: opacity 0.3s;
+        }
+        #toast.show { visibility: visible; opacity: 1; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Local<span>Sync</span></h1>
+        <div class="room-badge">ROOM: <span id="roomIdDisplay"></span></div>
+    </div>
+
+    <div class="container">
+        <div class="controls">
+            <input type="text" id="videoUrl" placeholder="Paste YouTube link here...">
+            <button onclick="loadVideo()">Play Video</button>
+            <button class="share-btn" onclick="shareRoom()">Copy Room Link</button>
+        </div>
+        
+        <div id="errorBox"></div>
+
+        <div class="video-wrapper">
+            <div id="player"></div>
+        </div>
+    </div>
+
+    <div id="toast">Link copied! Send it to anyone on your Wi-Fi.</div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        let roomId = urlParams.get('room');
+        if (!roomId) {
+            roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+            window.history.pushState({}, '', '?room=' + roomId);
+        }
+        document.getElementById('roomIdDisplay').innerText = roomId;
+
+        const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${roomId}`);
+        
+        // This lock prevents the infinite buffering loop
+        let isSyncing = false; 
+        let pendingCommand = null; 
+
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (!player || typeof player.loadVideoById !== 'function') {
+                pendingCommand = data;
+                return;
+            }
+            executeCommand(data);
+        };
+
+        function executeCommand(data) {
+            hideError();
+            
+            if (data.action === "load") {
+                isSyncing = true;
+                player.loadVideoById({videoId: data.videoId});
+                unlockSync();
+            } else if (data.action === "sync") {
+                isSyncing = true;
+                player.loadVideoById({videoId: data.videoId, startSeconds: data.time});
+                if (data.status === "pause") {
+                    setTimeout(() => { player.pauseVideo(); unlockSync(); }, 500);
+                } else {
+                    unlockSync();
+                }
+            } else if (data.action === "play") {
+                isSyncing = true;
+                const currentTime = player.getCurrentTime();
+                
+                // THE CORE FIX: Only force a buffer/seek if the video is out of sync by more than 1.5 seconds.
+                // If the videos are already close to the same time, just let it play smoothly.
+                if (Math.abs(currentTime - data.time) > 1.5) {
+                    player.seekTo(data.time, true);
+                }
+                player.playVideo();
+                unlockSync();
+                
+            } else if (data.action === "pause") {
+                isSyncing = true;
+                player.pauseVideo();
+                unlockSync();
+            }
+        }
+
+        // Helper function to safely release the lock after YouTube processes the command
+        function unlockSync() {
+            setTimeout(() => { isSyncing = false; }, 800);
+        }
+
+        let player;
+        function onYouTubeIframeAPIReady() {
+            player = new YT.Player('player', {
+                host: 'https://www.youtube-nocookie.com', 
+                playerVars: { 'autoplay': 0, 'controls': 1, 'rel': 0, 'enablejsapi': 1 },
+                events: { 'onReady': onPlayerReady, 'onStateChange': onPlayerStateChange, 'onError': onPlayerError }
+            });
+        }
+
+        function onPlayerReady(event) {
+            if (pendingCommand) {
+                executeCommand(pendingCommand);
+                pendingCommand = null;
+            }
+        }
+
+        function showError(message) {
+            const errBox = document.getElementById('errorBox');
+            errBox.innerText = message;
+            errBox.style.display = 'block';
+        }
+        
+        function hideError() {
+            document.getElementById('errorBox').style.display = 'none';
+        }
+
+        function onPlayerError(event) {
+            if (event.data === 150 || event.data === 101) {
+                showError("⚠️ Embed Blocked: The copyright owner of this specific video does not allow it to be played outside of YouTube.com.");
+            } else if (event.data === 2) {
+                showError("⚠️ Invalid Video ID. Please check the link.");
+            }
+        }
+
+        var tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+        function onPlayerStateChange(event) {
+            // If the state changed because the SERVER told us to change, do NOT broadcast it back.
+            if (isSyncing) {
+                return; 
+            }
+
+            // Only broadcast if a HUMAN clicked play, pause, or actively dragged the seek bar.
+            const currentTime = player.getCurrentTime();
+            if (event.data == YT.PlayerState.PLAYING) {
+                ws.send(JSON.stringify({ action: "play", time: currentTime }));
+            } else if (event.data == YT.PlayerState.PAUSED) {
+                ws.send(JSON.stringify({ action: "pause", time: currentTime }));
+            }
+        }
+
+        function extractVideoID(url) {
+            var regExp = /^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+            var match = url.match(regExp);
+            return (match && match[2].length === 11) ? match[2] : null;
+        }
+
+        function loadVideo() {
+            const rawInput = document.getElementById('videoUrl').value;
+            const videoId = extractVideoID(rawInput);
+            if(videoId) {
+                hideError();
+                player.loadVideoById({videoId: videoId});
+                ws.send(JSON.stringify({ action: "load", videoId: videoId }));
+            } else {
+                showError("⚠️ Please enter a valid YouTube link.");
+            }
+        }
+
+        function shareRoom() {
+            let shareUrl = window.location.href;
+            navigator.clipboard.writeText(shareUrl).then(() => {
+                const toast = document.getElementById("toast");
+                toast.className = "show";
+                setTimeout(function(){ toast.className = toast.className.replace("show", ""); }, 3000);
+            });
+        }
+    </script>
+</body>
+</html>
